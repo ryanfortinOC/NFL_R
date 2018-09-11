@@ -1,0 +1,191 @@
+---
+title: "NFL Betting"
+author: "Ryan"
+date: "8/10/2018"
+output: html_document
+---
+
+```{r}
+devtools::install_github(repo = "maksimhorowitz/nflscrapR")
+```
+
+```{r}
+library(nflscrapR)
+### For data tidyness and wrangling
+library(tidyverse)
+library(magrittr)
+library(caTools)
+library(zoo)
+library(caret)
+library(randomForest)
+library(nnet)
+data(nflteams)
+### This function take several minutes to run through...even once
+# pbp_2009 <- season_play_by_play(2009)
+# pbp_2010 <- season_play_by_play(2010)
+# pbp_2011 <- season_play_by_play(2011)
+# pbp_2012 <- season_play_by_play(2012)
+# pbp_2013 <- season_play_by_play(2013)
+# pbp_2014 <- season_play_by_play(2014)
+# pbp_2015 <- season_play_by_play(2015)
+# pbp_2016 <- season_play_by_play(2016)
+# pbp_2017 <- season_play_by_play(2017)
+# 
+# ### Stack the datasets
+# pbp_data <- bind_rows(pbp_2009, pbp_2010, pbp_2011, pbp_2012, pbp_2013, pbp_2014, 
+#     pbp_2015, pbp_2016, pbp_2017)
+# 
+# saveRDS(pbp_data,"pbp_data_09_17.rds")
+# 
+# games_2009 <- season_games(Season = 2009)
+# games_2010 <- season_games(Season = 2010)
+# games_2011 <- season_games(Season = 2011)
+# games_2012 <- season_games(Season = 2012)
+# games_2013 <- season_games(Season = 2013)
+# games_2014 <- season_games(Season = 2014)
+# games_2015 <- season_games(Season = 2015)
+# games_2016 <- season_games(Season = 2016)
+# games_2017 <- season_games(Season = 2017)
+# 
+# games_data <- bind_rows(games_2009,games_2010,games_2011,games_2012,games_2013,games_2014,games_2015,games_2016,games_2017)
+# 
+# saveRDS(games_data,"games_data_09_17.rds")
+# 
+# team_rosters = season_rosters(season = 2009, nflteams$abbr[1])
+# temp = NULL
+# for(i in 2009:2017) {
+#   for(j in 1:length(nflteams$abbr)){
+#     temp = season_rosters(season = i, nflteams$abbr[j])
+#     team_rosters %<>% bind_rows(temp)
+#   }
+# }
+# 
+# saveRDS(team_rosters,"team_rosters.rds")
+# 
+# agg_player_season_2009 <- agg_player_season(2009)
+# agg_player_season_2010 <- agg_player_season(2010)
+# agg_player_season_2011 <- agg_player_season(2011)
+# agg_player_season_2012 <- agg_player_season(2012)
+# agg_player_season_2013 <- agg_player_season(2013)
+# agg_player_season_2014 <- agg_player_season(2014)
+# agg_player_season_2015 <- agg_player_season(2015)
+# agg_player_season_2016 <- agg_player_season(2016)
+# agg_player_season_2017 <- agg_player_season(2017)
+# 
+# agg_player_data <- bind_rows(agg_player_season_2009,agg_player_season_2010,agg_player_season_2011,agg_player_season_2012,agg_player_season_2013,agg_player_season_2014,agg_player_season_2015,agg_player_season_2016,agg_player_season_2017)
+# 
+# saveRDS(agg_player_data,"agg_player_data.rds")
+```
+
+```{r}
+pbp_data <- readRDS("pbp_data_09_17.rds")
+
+games_data <- readRDS("games_data_09_17.rds")
+
+weather_data <- read.csv("spreadspoke_scores.csv")
+
+pbp_games <- full_join(pbp_data,games_data, by = "GameID")
+
+pbp_games <- pbp_games %>%
+  mutate(home = as.character(home), away = as.character(away),
+         winner = ifelse(homescore > awayscore, home, away),
+         poswins = ifelse(winner == posteam,1,0),
+         WeatherGameID = paste0(substr(GameID,1,8),away,home),
+         down = as.factor(down),
+         qtr = as.factor(qtr),
+         season = substr(GameID,1,4)) %>%
+  left_join(weather_data, by = c("WeatherGameID" = "game_id")) %>%
+  mutate()
+
+pbp_games_reduced <- pbp_games %>%
+  filter(PlayType != "No Play" & qtr != 5 & down != "NA" & poswins != "NA")
+
+weighting_regress = .34
+weighting_team = .66
+
+points_per_drive <- pbp_games_reduced %>%
+  select(GameID,date,season,schedule_week,home,away,Drive,posteam,homescore,awayscore) %>%
+  #distinct(.keep_all = TRUE) %>%
+  group_by(GameID,posteam) %>%
+  distinct(.keep_all = TRUE) %>%
+  mutate(num_drives = n()) %>%
+  select(GameID,date,season,schedule_week,home,away,posteam,homescore,awayscore,num_drives) %>%
+  distinct(.keep_all = TRUE) %>%
+  ungroup() %>%
+  group_by(GameID) %>%
+  mutate(opponent_drives = lead(num_drives),
+         opponent_drives = ifelse(is.na(opponent_drives),lag(num_drives),opponent_drives),
+         points_for = ifelse(posteam == home,homescore,awayscore),
+         points_against = ifelse(posteam == home,awayscore,homescore)) %>%
+  ungroup() %>%
+  select(GameID,date,season,schedule_week,team = posteam,num_drives,points_for,opponent_drives,points_against) %>%
+  group_by(team,season) %>%
+  arrange(team,date) %>%
+  mutate(roll_num_drives = cumsum(num_drives),
+         roll_points_for = cumsum(points_for),
+         roll_opponent_drives = cumsum(opponent_drives),
+         roll_points_against = cumsum(points_against),
+         roll_ppd = roll_points_for/roll_num_drives,
+         roll_papd = roll_points_against/roll_opponent_drives) %>%
+  mutate(pre_game_ppd = lag(roll_ppd),
+         pre_game_papd = lag(roll_papd),
+         pre_game_ppd = ifelse(is.na(pre_game_ppd),1.95,pre_game_ppd),
+         pre_game_papd = ifelse(is.na(pre_game_papd),1.95,pre_game_papd)) %>%
+  mutate(pre_game_ppd = ifelse(is.na(lag(pre_game_ppd)),1.95,(.33*1.95) + (.66*lag(pre_game_ppd))),
+         pre_game_papd = ifelse(is.na(lag(pre_game_papd)),1.95,(.33*1.95) + (.66*lag(pre_game_papd)))) %>%
+  select(GameID,season,team,pre_game_ppd,pre_game_papd)
+
+ppd = points_per_drive %>%
+  select(GameID,team,pre_game_ppd)
+
+papd = points_per_drive %>%
+  select(GameID,team,pre_game_papd)
+
+final_dat <- pbp_games_reduced %>%
+  mutate(non_posteam = ifelse(posteam == home, away, home)) %>%
+  left_join(ppd, by = c("GameID" = "GameID","posteam" = "team")) %>%
+  left_join(papd, by = c("GameID" = "GameID","non_posteam" = "team")) %>%
+  select(GameID,Date,posteam,non_posteam,HomeTeam,AwayTeam,winner,qtr,down,ydstogo,TimeSecs,yrdline100,ScoreDiff,weather_temperature,weather_wind_mph,pre_game_ppd,pre_game_papd,poswins) %>%
+  filter(!is.na(weather_temperature))
+
+
+split = sample.split(final_dat$poswins, SplitRatio = 0.8)
+train = final_dat %>% filter(split == TRUE) %>% mutate(qtr = as.factor(qtr), down = as.factor(down))
+test = final_dat %>% filter(split == FALSE) %>% mutate(qtr = as.factor(qtr), down = as.factor(down))
+
+# quick_rf <- randomForest(x=train[,8:17],y=train$poswins, ntree=10, importance = TRUE)
+# imp_rf <- importance(quick_rf)
+# imp_DF <- data.frame(Variables = row.names(imp_rf), MSE = imp_rf[,1])
+# imp_DF <- imp_DF[order(imp_DF$MSE, decreasing = TRUE),]
+# 
+# ggplot(imp_DF[1:20,], aes(x=reorder(Variables,MSE), y=MSE, fill=MSE)) + geom_bar(stat="identity") + labs(x = "Variables", y = "% increase MSE if variable is randomly permutated") + coord_flip() + theme(legend.position = "none")
+
+log_model1 <- glm(poswins~qtr+down+ydstogo+TimeSecs+yrdline100+ScoreDiff+weather_temperature+weather_wind_mph+pre_game_ppd+pre_game_papd,data=train,family="binomial")
+
+# pred1 = predict(quick_rf, train, type = "response")
+pred2 = predict(log_model1, train, type = "response")
+
+# train_rf = cbind(train,pred1)
+# train_rf = mutate(train_rf, pred1l = ifelse(posteam == HomeTeam, pred1, 1-pred1))
+
+train_log = cbind(train,pred2)
+train_log = mutate(train_log, pred1h = ifelse(posteam == HomeTeam, pred2, 1-pred2))
+
+ggplot(filter(train_log, GameID == "2016090800"), aes(x=TimeSecs,y=pred1h)) + geom_line(size = 2, colour = "orange") + scale_x_reverse() + ylim(c(0,1)) + theme_minimal() + xlab("Time Remaining (seconds)") + ylab("Home Win Probability")
+
+neural_network <- nnet(poswins~qtr+down+ydstogo+TimeSecs+yrdline100+ScoreDiff+weather_temperature+weather_wind_mph+pre_game_ppd+pre_game_papd,data=train,decay=5e-4,maxit=200,size=2)
+
+pred_nnet = predict(neural_network,train,type = "raw")
+
+train_nnet = cbind(train,pred_nnet)
+train_nnet = mutate(train_nnet, pred1n = ifelse(posteam == HomeTeam, pred_nnet,1-pred_nnet))
+
+neural_network2 <- nnet(poswins~qtr+down+ydstogo+TimeSecs+yrdline100+ScoreDiff+weather_temperature+weather_wind_mph+pre_game_ppd+pre_game_papd,data=train,decay=5e-4,maxit=200,size=10)
+
+pred_nnet2 = predict(neural_network2,train,type = "raw")
+
+train_nnet2 = cbind(train,pred_nnet2)
+train_nnet2 = mutate(train_nnet2, pred2n = ifelse(posteam == HomeTeam, pred_nnet2,1-pred_nnet2))
+
+ggplot(filter(train_nnet2, GameID == "2016090800"), aes(x=TimeSecs,y=pred2n)) + geom_line(size = 2, colour = "orange") + scale_x_reverse() + ylim(c(0,1)) + theme_minimal() + xlab("Time Remaining (seconds)") + ylab("Home Win Probability")
+```
